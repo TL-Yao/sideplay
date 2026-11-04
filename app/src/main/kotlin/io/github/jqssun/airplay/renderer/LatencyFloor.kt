@@ -8,6 +8,7 @@ class LatencyFloor(private var baseMs: Int, private val clock: () -> Long = Syst
     private var currentMs = baseMs
     private var belowSinceNs = NONE
     private var consecutiveLate = 0
+    private var warmupLeft = WARMUP_FRAMES
 
     @Synchronized
     fun reset(baseMs: Int) {
@@ -16,6 +17,7 @@ class LatencyFloor(private var baseMs: Int, private val clock: () -> Long = Syst
         currentMs = baseMs
         belowSinceNs = NONE
         consecutiveLate = 0
+        warmupLeft = WARMUP_FRAMES
     }
 
     @Synchronized
@@ -23,10 +25,10 @@ class LatencyFloor(private var baseMs: Int, private val clock: () -> Long = Syst
 
     @Synchronized
     fun observeReadyDelayNs(ns: Long) {
+        if (warmupLeft > 0) { warmupLeft--; return }
         val now = clock()
         samples.addLast(now to ns)
         while (samples.first().first < now - WINDOW_NS) samples.removeFirst()
-        if (samples.size < MIN_SAMPLES) return
 
         val candidate = maxOf(baseMs, _ceil10Ms(_percentile(95) + MARGIN_NS))
         when {
@@ -74,7 +76,7 @@ class LatencyFloor(private var baseMs: Int, private val clock: () -> Long = Syst
         private const val STEP_NS = 10_000_000L
         private const val MAX_MS = 500
         private const val RESCUE_AFTER_DROPS = 15
-        // keeps the slow first frames after a codec start from setting the floor on their own
-        private const val MIN_SAMPLES = 20
+        // the first frames after a (re)started codec decode far slower than steady state; not counted
+        private const val WARMUP_FRAMES = 5
     }
 }

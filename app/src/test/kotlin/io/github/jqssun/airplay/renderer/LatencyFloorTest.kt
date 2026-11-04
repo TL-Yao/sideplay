@@ -41,9 +41,26 @@ class LatencyFloorTest {
         assertEquals(500, floor.current())
     }
 
-    @Test fun singleOutlierDoesNotRaise() {
-        floor.observeReadyDelayNs(300_000_000L)
+    @Test fun warmupFramesIgnoredThenFirstSampleRaisesAtOnce() {
+        repeat(5) { now += 16_666_667; floor.observeReadyDelayNs(300_000_000L) }
+        assertEquals(90, floor.current())
+        now += 16_666_667
+        floor.observeReadyDelayNs(130_000_000L)
+        assertEquals(140, floor.current())
+    }
+
+    @Test fun warmupRestartsAfterReset() {
         feed(40, 1)
+        floor.reset(90)
+        repeat(5) { now += 16_666_667; floor.observeReadyDelayNs(300_000_000L) }
+        assertEquals(90, floor.current())
+    }
+
+    // reviewer probe: once decoding recovers to a true 40 ms, L_eff must come back down to base
+    @Test fun recoversToBaseAfterDecodeSpeedsUp() {
+        feed(130, 1)
+        assertEquals(140, floor.current())
+        feed(40, 15)
         assertEquals(90, floor.current())
     }
 
