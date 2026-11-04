@@ -9,6 +9,8 @@ import android.util.Log
 import android.view.Surface
 import io.github.jqssun.airplay.renderer.DecoderSelector.Companion.videoCaps
 import java.util.Locale
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.LockSupport
 import kotlin.concurrent.thread
 
@@ -55,10 +57,12 @@ class VideoRenderer(ctx: Context) {
     private var _frameIntervalCount = 0
     private var _lastOutputFrameNs = 0L
 
-    private var _outputThread: Thread? = null
+    // fetch thread dequeues and timestamps decoded frames; present thread waits for their time and releases
+    private var _outputThreads = emptyList<Thread>()
+    private val _readyFrames = LinkedBlockingQueue<ReadyFrame>()
     @Volatile private var _outputRunning = false
     @Volatile private var _outputFailed = false
-    // owned by the output thread
+    // owned by the present thread
     private var _syncWindowStartNs = 0L
     private var _offsetSumNs = 0L
     private var _offsetMaxNs = 0L
@@ -294,37 +298,60 @@ class VideoRenderer(ctx: Context) {
         codec = null
     }
 
-    // never takes `lock`, so stopCodec can join it while holding the lock
+    // neither thread takes `lock`, so stopCodec can join them while holding the lock
     private fun _startOutput(c: MediaCodec) {
         val intervalNs = 1_000_000_000L / (if (maxFps > 0) maxFps else 60)
         _outputFailed = false
         _outputRunning = true
+        _readyFrames.clear()
         _syncWindowStartNs = System.nanoTime()
-        _outputThread = thread(name = "VideoOutput") { _outputLoop(c, intervalNs) }
+        _outputThreads = listOf(
+            thread(name = "VideoOutputFetch") { _guardOutput { _fetchLoop(c) } },
+            thread(name = "VideoOutput") { _guardOutput { _presentLoop(c, intervalNs) } },
+        )
     }
 
     private fun _stopOutput() {
-        val t = _outputThread ?: return
+        if (_outputThreads.isEmpty()) return
         _outputRunning = false
-        LockSupport.unpark(t)
-        t.join()
-        _outputThread = null
+        _outputThreads.forEach { LockSupport.unpark(it) }
+        _outputThreads.forEach { it.join() }
+        _outputThreads = emptyList()
+        _readyFrames.clear() // their buffers go back with codec.stop()
         _outputFailed = false
     }
 
-    private fun _outputLoop(c: MediaCodec, intervalNs: Long) {
+    private inline fun _guardOutput(loop: () -> Unit) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
-        val info = MediaCodec.BufferInfo()
         try {
-            while (_outputRunning) {
-                val idx = c.dequeueOutputBuffer(info, OUTPUT_WAIT_US)
-                if (idx >= 0) _present(c, idx, info.presentationTimeUs * 1000, intervalNs)
-                _maybeLogSync()
-            }
+            loop()
         } catch (e: Exception) {
             // the next feedFrame sees the flag and runs the usual stopCodec-and-wait-for-keyframe reset
             Log.w(TAG, "Codec error on output thread, resetting", e)
             _outputFailed = true
+        }
+    }
+
+    // never waits on presentation, so readyNs is when the decoder actually produced the frame
+    private fun _fetchLoop(c: MediaCodec) {
+        val info = MediaCodec.BufferInfo()
+        while (_outputRunning) {
+            val idx = c.dequeueOutputBuffer(info, OUTPUT_WAIT_US)
+            if (idx < 0) continue
+            val readyNs = System.nanoTime()
+            val ptsNs = info.presentationTimeUs * 1000
+            if (ptsNs != 0L) {
+                floor.observeReadyDelayNs(readyNs - ptsNs)
+                _publishLatency()
+            }
+            _readyFrames.put(ReadyFrame(idx, ptsNs))
+        }
+    }
+
+    private fun _presentLoop(c: MediaCodec, intervalNs: Long) {
+        while (_outputRunning) {
+            _readyFrames.poll(OUTPUT_WAIT_US, TimeUnit.MICROSECONDS)?.let { _present(c, it.idx, it.ptsNs, intervalNs) }
+            _maybeLogSync()
         }
     }
 
@@ -334,8 +361,6 @@ class VideoRenderer(ctx: Context) {
             _recordOutputFrameTime()
             return
         }
-        floor.observeReadyDelayNs(System.nanoTime() - ptsNs)
-        _publishLatency()
         val target = ptsNs + floor.current() * 1_000_000L - DISPLAY_LAG_NS
         var now = System.nanoTime()
         while (now < target && _outputRunning) {
@@ -400,6 +425,8 @@ class VideoRenderer(ctx: Context) {
         val variance = (sumSq / count) - (mean * mean)
         return (kotlin.math.sqrt(variance.coerceAtLeast(0.0)) / 1000.0).toLong()
     }
+
+    private class ReadyFrame(val idx: Int, val ptsNs: Long)
 
     companion object {
         private const val TAG = "VideoRenderer"
