@@ -1,0 +1,48 @@
+diff --git a/lib/raop_buffer.c b/lib/raop_buffer.c
+index d0ed368..bcdb244 100644
+--- a/lib/raop_buffer.c
++++ b/lib/raop_buffer.c
+@@ -24,0 +25 @@
++#include <time.h>
+@@ -36,0 +38,11 @@
++/* a missing packet holds playout at most this long before being skipped; one
++ * resend request per gap at most this often (the sender answers each request
++ * with a burst, so unthrottled requests at packet rate flood the link) */
++#define RAOP_GAP_TIMEOUT_NS   100000000ULL
++#define RAOP_RESEND_MIN_NS     30000000ULL
++
++static uint64_t mono_ns(void) {
++    struct timespec t;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return (uint64_t) t.tv_sec * 1000000000ULL + (uint64_t) t.tv_nsec;
++}
+@@ -61,0 +74,3 @@ struct raop_buffer_s {
++    /* when the head entry was first seen missing, 0 = no gap */
++    uint64_t gap_since_ns;
++    uint64_t last_resend_ns;
+@@ -246,2 +261,13 @@ raop_buffer_dequeue(raop_buffer_t *raop_buffer, unsigned int *length, uint32_t *
+-            /* Return nothing and hope resend gets on time */
+-            return NULL;
++            uint64_t now = mono_ns();
++            if (!raop_buffer->gap_since_ns) {
++                raop_buffer->gap_since_ns = now;
++            }
++            if (now - raop_buffer->gap_since_ns < RAOP_GAP_TIMEOUT_NS) {
++                /* Return nothing and hope resend gets on time */
++                return NULL;
++            }
++            /* waited long enough: skip the hole, play what we have */
++            while (!entry->filled && seqnum_cmp(raop_buffer->first_seqnum, raop_buffer->last_seqnum) < 0) {
++                raop_buffer->first_seqnum += 1;
++                entry = &raop_buffer->entries[raop_buffer->first_seqnum % RAOP_BUFFER_LENGTH];
++            }
+@@ -250,0 +277 @@ raop_buffer_dequeue(raop_buffer_t *raop_buffer, unsigned int *length, uint32_t *
++    raop_buffer->gap_since_ns = 0;
+@@ -274,0 +302,5 @@ void raop_buffer_handle_resends(raop_buffer_t *raop_buffer, raop_resend_cb_t res
++        uint64_t now = mono_ns();
++        if (now - raop_buffer->last_resend_ns < RAOP_RESEND_MIN_NS) {
++            return;
++        }
++        raop_buffer->last_resend_ns = now;
+@@ -300,0 +333 @@ void raop_buffer_flush(raop_buffer_t *raop_buffer, int next_seq) {
++    raop_buffer->gap_since_ns = 0;

@@ -1,0 +1,35 @@
+# fork-only: build a signed release APK as a workflow artifact (no GitHub release)
+name: Fork APK
+
+on:
+  push:
+    branches: ["fix/**", "fork/**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "21"
+          cache: "gradle"
+
+      - name: Build
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+          echo ${{ secrets.STORE }} | base64 -d > upload.jks
+          echo ${{ secrets.LOCAL }} | base64 -d > local.properties
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --stacktrace
+          rm upload.jks local.properties
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sideplay-${{ github.sha }}
+          path: app/build/outputs/apk/release/app-release.apk
