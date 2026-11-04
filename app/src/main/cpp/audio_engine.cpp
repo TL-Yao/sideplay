@@ -31,8 +31,8 @@ struct __attribute__((packed)) AudioDebugData {
 };
 
 struct AudioConfig {
-    const int staticCushionMs;   // 0 = adaptive tuner
-    const int percentilePct;     // adaptive tuner target percentile
+    const int staticCushionMs;   // unused: playout is scheduled at pts + target latency
+    const int percentilePct;     // unused: adaptive tuner removed
     const int oboeBufferFrames;  // 0 = auto, two bursts in low-latency mode, oboe default in power save
     const bool forceSwAlac;      // embedded ffmpeg software ALAC even when HW available
     const bool realtimePriority; // decoder: request realtime priority
@@ -73,7 +73,7 @@ struct AudioEngine {
         std::lock_guard<std::mutex> lk(mRebuildLock);
         mRunning = true;
         if (mOutput && !mOutputActive) {
-            mTimeline->flushAndReprime();
+            mTimeline->flush();
             mOutputActive = mOutput->start();
         }
         return mOutputActive;
@@ -143,14 +143,33 @@ struct AudioEngine {
                                     mDecLatency, *mLog, mApplied->forceSwAlac,
                                     mApplied->realtimePriority, mApplied->lowLatency)};
             mRetryAtNs = mDecoder.decoder ? 0 : monoNs() + DECODER_RETRY_NS;
-            // codec switch is definitely a discontinuity
-            mTimeline->reanchorTracker();
         }
         if (mDecoder.decoder && !mDecoder.decoder->decode(data, len, ptsNs))
             mDecodeErrors.fetch_add(1, std::memory_order_relaxed);
+        logSyncStats();
+    }
+
+    // any thread
+    void setTargetLatency(int64_t latencyNs) {
+        std::lock_guard<std::mutex> lk(mRebuildLock);
+        mTargetLatencyNs = latencyNs;
+        if (mTimeline) mTimeline->setTargetLatencyNs(latencyNs);
     }
 
 private:
+    // decode thread; always on, independent of benchmarkLog
+    void logSyncStats() {
+        const int64_t now = monoNs();
+        if (now < mNextSyncLogNs) return;
+        const bool first = mNextSyncLogNs == 0;
+        mNextSyncLogNs = now + SYNC_LOG_NS;
+        if (first) return;
+        const TimelineBuffer::Debug d = mTimeline->debugInfo();
+        mLog->info("audio sync: L=%dms offset mean=%.1fms max=%.1fms late=%u silence=%u underrun=%u",
+                   (int)d.targetLatencyMs, d.offsetMeanUs / 1000.0, d.offsetMaxUs / 1000.0,
+                   d.lateDrops, d.silenceFills, d.underruns);
+    }
+
     static int ctIndex(int ct) {
         switch (ct) {
             case CT_ALAC:    return 0;
@@ -162,8 +181,8 @@ private:
 
     void initInternals(const AudioConfig &cfg) {
         mDecLatency.setEnableLogging(cfg.benchmarkLog);
-        mTimeline = std::make_shared<TimelineBuffer>(mSampleRate, mChannels,
-                                                     cfg.staticCushionMs, cfg.percentilePct);
+        mTimeline = std::make_shared<TimelineBuffer>(mSampleRate, mChannels);
+        mTimeline->setTargetLatencyNs(mTargetLatencyNs);
         mOutput = AudioOutput::create(mSampleRate, mChannels, cfg.oboeBufferFrames,
                                       cfg.lowLatency, mTimeline, mLog);
         mApplied = std::make_unique<AudioConfig>(cfg);
@@ -183,6 +202,10 @@ private:
     std::shared_ptr<AudioOutput> mOutput;      // guarded by mRebuildLock
     bool mRunning = false;                     // requested output state, guarded by mRebuildLock
     bool mOutputActive = false;                // actual output state, guarded by mRebuildLock
+    int64_t mTargetLatencyNs = 90'000'000;     // survives timeline rebuilds, guarded by mRebuildLock
+
+    static constexpr int64_t SYNC_LOG_NS = 5'000'000'000LL;
+    int64_t mNextSyncLogNs = 0;                // decode-thread-only
 
     LatencyReporter mDecLatency{"decode", *mLog};
     // decoder + codec/config it was built with
@@ -228,6 +251,10 @@ bool audio_engine_configure(AudioEngine *engine, int cushionMs, int percentilePc
     if (!engine) return false;
     return engine->configure({cushionMs, percentilePct, oboeBufferFrames, forceSwAlac,
                               realtimePriority, lowLatency, benchmarkLog});
+}
+
+void audio_engine_set_target_latency(AudioEngine *engine, int64_t latencyNs) {
+    if (engine) engine->setTargetLatency(latencyNs);
 }
 
 void audio_engine_on_format(AudioEngine *engine, int ct, int spf) {

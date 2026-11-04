@@ -10,6 +10,7 @@
 #include <android/log.h>
 #include "android_raop_callbacks.h"
 #include "audio_engine.h"
+#include "clock_convert.h"
 
 #define TAG "AirPlayNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -103,11 +104,24 @@ void android_callbacks_update_playback_info(android_callback_ctx_t *ctx, double 
 
 /* --- RAOP callback implementations --- */
 
+/* UxPlay's ntp_time_local is CLOCK_REALTIME ns; everything above this layer runs on
+ * CLOCK_MONOTONIC (System.nanoTime, oboe timestamps). realtime can step, so take the
+ * offset fresh per packet, both clocks read back to back */
+static int64_t _mono_from_local_ns(uint64_t realtime_ns) {
+    if (!realtime_ns) return 0;
+    struct timespec mono, real;
+    clock_gettime(CLOCK_MONOTONIC, &mono);
+    clock_gettime(CLOCK_REALTIME, &real);
+    const int64_t diff = ((int64_t)mono.tv_sec - (int64_t)real.tv_sec) * 1000000000LL
+                         + ((int64_t)mono.tv_nsec - (int64_t)real.tv_nsec);
+    return (int64_t)mono_from_realtime_ns(realtime_ns, diff);
+}
+
 static void _audio_process(void *cls, raop_ntp_t *ntp, audio_decode_struct *data) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
     if (!ctx->audio_engine || !data->data || data->data_len <= 0) return;
     audio_engine_decode(ctx->audio_engine, data->data, data->data_len,
-                        (int)data->ct, (int64_t)data->ntp_time_local);
+                        (int)data->ct, _mono_from_local_ns(data->ntp_time_local));
 }
 
 static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data) {
@@ -123,7 +137,8 @@ static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data
     jbyteArray arr = (*env)->NewByteArray(env, data->data_len);
     (*env)->SetByteArrayRegion(env, arr, 0, data->data_len, (jbyte *)data->data);
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_video_data,
-                           arr, (jlong)data->ntp_time_local, (jboolean)data->is_h265);
+                           arr, (jlong)_mono_from_local_ns(data->ntp_time_local),
+                           (jboolean)data->is_h265);
     (*env)->DeleteLocalRef(env, arr);
 }
 

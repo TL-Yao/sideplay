@@ -404,6 +404,14 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeServerAudioConfigure(
 
 extern "C"
 JNIEXPORT void JNICALL
+Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeServerAudioSetTargetLatency(
+        JNIEnv *env, jclass clazz, jlong handle, jlong latencyNs) {
+    server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
+    if (ctx && ctx->cb_ctx.audio_engine) audio_engine_set_target_latency(ctx->cb_ctx.audio_engine, latencyNs);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
 Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeServerAudioFormat(
         JNIEnv *env, jobject thiz, jlong handle, jint ct, jint spf) {
     server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;

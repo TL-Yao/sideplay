@@ -27,6 +27,10 @@ bool audio_engine_configure(AudioEngine *engine, int cushionMs, int percentilePc
                             int oboeBufferFrames, bool forceSwAlac, bool realtimePriority,
                             bool lowLatency, bool benchmarkLog);
 
+/* playout delay after sender pts (CLOCK_MONOTONIC); any thread, applies to the next
+ * packets; default 90 ms */
+void audio_engine_set_target_latency(AudioEngine *engine, int64_t latencyNs);
+
 /* sender is switching audio formats */
 void audio_engine_on_format(AudioEngine *engine, int ct, int spf);
 
@@ -42,7 +46,8 @@ bool audio_engine_get_debug(AudioEngine *engine, void *dst, size_t dstLen);
 /* stop + destroy engine; no concurrent or later audio_engine_decode calls allowed */
 void audio_engine_destroy(AudioEngine *engine);
 
-/* decode + play one encoded airplay packet; not concurrent with audio_engine_destroy */
+/* decode + play one encoded airplay packet at pts_ns + target latency; pts_ns is local
+ * CLOCK_MONOTONIC ns (0 = not synced yet); not concurrent with audio_engine_destroy */
 void audio_engine_decode(AudioEngine *engine, const uint8_t *data, int len, int ct, int64_t pts_ns);
 
 #ifdef __cplusplus

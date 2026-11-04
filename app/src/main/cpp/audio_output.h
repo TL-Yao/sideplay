@@ -25,9 +25,9 @@ public:
     OboeCallbacks(std::shared_ptr<TimelineBuffer> timeline, std::shared_ptr<LogSink> log)
         : mTimeline(std::move(timeline)), mLog(std::move(log)) {}
 
-    oboe::DataCallbackResult onAudioReady(oboe::AudioStream *, void *audioData,
+    oboe::DataCallbackResult onAudioReady(oboe::AudioStream *stream, void *audioData,
                                           int32_t numFrames) override {
-        mTimeline->read(static_cast<int16_t *>(audioData), numFrames);
+        mTimeline->read(static_cast<int16_t *>(audioData), numFrames, firstFrameDacNs(stream));
         return oboe::DataCallbackResult::Continue;
     }
 
@@ -35,6 +35,23 @@ public:
 
 private:
     friend class AudioOutput;
+
+    // CLOCK_MONOTONIC time at which the first frame of this callback leaves the DAC.
+    // getTimestamp says frame framePosition was presented at timeNanoseconds; this
+    // callback's first frame is getFramesWritten(), extrapolate linearly. called first
+    // thing in the callback: pre-R OpenSL/legacy AAudio can assert if a route change
+    // lands mid-callback (oboe TechNote_ReleaseBuffer)
+    static int64_t firstFrameDacNs(oboe::AudioStream *stream) {
+        const int64_t sr = stream->getSampleRate();
+        const int64_t now = monoNs();
+        int64_t framePos = 0, timeNs = 0;
+        if (stream->getTimestamp(CLOCK_MONOTONIC, &framePos, &timeNs) == oboe::Result::OK && timeNs > 0) {
+            const int64_t dac = timeNs + (stream->getFramesWritten() - framePos) * NS_PER_SEC / sr;
+            if (dac >= now) return dac;  // unwritten frame can't have been presented: else bogus
+        }
+        // no timestamp yet (stream just started) or unsupported: assume a full buffer ahead
+        return now + (int64_t)stream->getBufferSizeInFrames() * NS_PER_SEC / sr;
+    }
 
     std::shared_ptr<TimelineBuffer> mTimeline;
     std::shared_ptr<LogSink> mLog;
@@ -108,7 +125,6 @@ private:
         std::lock_guard<std::mutex> lk(mLock);
         if (mClosing.load()) return;
         mStream.reset();
-        mTimeline->reprime();
         if (openLocked()) mStream->requestStart();
     }
 
@@ -154,8 +170,6 @@ private:
                   api, lowLatency ? " (low-latency)" : "", mmap ? "yes" : "no",
                   mStream->getBufferSizeInFrames(), mStream->getBufferCapacityInFrames(),
                   mStream->getFramesPerBurst(), mStream->getSampleRate());
-        // adaptive tuner needs final buffer size
-        mTimeline->noteOutputBufferFrames(mStream->getBufferSizeInFrames());
         return true;
     }
 

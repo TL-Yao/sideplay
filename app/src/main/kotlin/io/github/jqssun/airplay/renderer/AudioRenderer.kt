@@ -11,10 +11,25 @@ class AudioRenderer {
 
     private var serverHandle = 0L
 
+    private var targetLatencyMs = 90
+
     @Synchronized
     fun attachEngine(server: Long) {
         serverHandle = server
         pushConfig()
+        pushTargetLatency()
+    }
+
+    // audio plays this long after its sender timestamp; remembered until an engine attaches
+    @Synchronized
+    fun setTargetLatencyMs(ms: Int) {
+        targetLatencyMs = ms
+        pushTargetLatency()
+    }
+
+    private fun pushTargetLatency() {
+        if (serverHandle == 0L) return
+        NativeBridge.nativeServerAudioSetTargetLatency(serverHandle, targetLatencyMs * 1_000_000L)
     }
 
     @Synchronized
