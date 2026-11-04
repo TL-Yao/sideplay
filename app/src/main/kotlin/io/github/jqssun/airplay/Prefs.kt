@@ -19,7 +19,6 @@ object Prefs {
     val KEY_PRIORITY: String = MediaFormat.KEY_PRIORITY; const val DEF_KEY_PRIORITY = true
     const val LOW_LATENCY = "low_latency"; const val DEF_LOW_LATENCY = false
     const val OPERATING_RATE = "operating_rate"; const val DEF_OPERATING_RATE = AUTO
-    const val SCHEDULED_OUTPUT_BUFFER_RELEASE = "scheduled_output_buffer_release"; const val DEF_SCHEDULED_OUTPUT_BUFFER_RELEASE = false
     const val AUDIO_AUTO_BUFFER = "audio_auto_buffer"; const val DEF_AUDIO_AUTO_BUFFER = true
     // fixed cushion ms, used only when AUDIO_AUTO_BUFFER is off
     const val AUDIO_CUSHION_MS = "audio_cushion_ms"; const val DEF_AUDIO_CUSHION_MS = 40

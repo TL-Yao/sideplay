@@ -4,9 +4,13 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Process
 import android.util.Log
 import android.view.Surface
 import io.github.jqssun.airplay.renderer.DecoderSelector.Companion.videoCaps
+import java.util.Locale
+import java.util.concurrent.locks.LockSupport
+import kotlin.concurrent.thread
 
 class VideoRenderer(ctx: Context) {
 
@@ -30,10 +34,17 @@ class VideoRenderer(ctx: Context) {
     @Volatile var codecName = ""; private set
     @Volatile var droppedFrames = 0L; private set
     @Volatile var framePacingJitterUs = 0L; private set
+    @Volatile var lateFrames = 0L; private set
+
+    // frames are shown at sender pts + L_eff; L_eff starts at this base and rises with decode delay
+    @Volatile var targetLatencyMs = BASE_LATENCY_MS
+    @Volatile var effectiveLatencyMs = BASE_LATENCY_MS; private set
+    // called on the output thread (or the caller of a reset) with each new L_eff
+    var onEffectiveLatencyChanged: ((Int) -> Unit)? = null
+    private val floor = LatencyFloor(BASE_LATENCY_MS)
 
     var enforceSdr = true
     var keyAllowFrameDrop = true
-    var scheduledOutputBufferRelease = true
     var benchmarkLog = false
     var benchmarkLogCallback: ((String) -> Unit)? = null
     private var _framesThisSec = 0
@@ -43,11 +54,18 @@ class VideoRenderer(ctx: Context) {
     private var _frameIntervalIdx = 0
     private var _frameIntervalCount = 0
     private var _lastOutputFrameNs = 0L
-    // anchors that map decoder PTS (us) to System.nanoTime() for scheduled rendering
-    private var _ptsBaseUs = Long.MIN_VALUE
-    private var _wallBaseNs = 0L
+
+    private var _outputThread: Thread? = null
+    @Volatile private var _outputRunning = false
+    @Volatile private var _outputFailed = false
+    // owned by the output thread
+    private var _syncWindowStartNs = 0L
+    private var _offsetSumNs = 0L
+    private var _offsetMaxNs = 0L
+    private var _offsetCount = 0
 
     fun setResolution(w: Int, h: Int) {
+        if (w != videoWidth || h != videoHeight) _resetLatency()
         videoWidth = w
         videoHeight = h
         pipeline.setVideoSize(w, h)
@@ -83,13 +101,25 @@ class VideoRenderer(ctx: Context) {
             .reduceOrNull { (w1, h1), (w2, h2) -> minOf(w1, w2) to minOf(h1, h2) } ?: (1920 to 1080)
 
     // codec per mirror session; pipeline persists across sessions
-    fun startSession() = synchronized(lock) { _resetStats() }
+    fun startSession() = synchronized(lock) { _resetStats(); _resetLatency() }
 
-    fun stopSession() = synchronized(lock) { stopCodec() }
+    fun stopSession() = synchronized(lock) { stopCodec(); _resetLatency() }
+
+    private fun _resetLatency() {
+        floor.reset(targetLatencyMs)
+        _publishLatency(force = true)
+    }
+
+    private fun _publishLatency(force: Boolean = false) = synchronized(floor) {
+        val ms = floor.current()
+        if (!force && ms == effectiveLatencyMs) return@synchronized
+        effectiveLatencyMs = ms
+        onEffectiveLatencyChanged?.invoke(ms)
+    }
 
     private fun _resetStats() {
         fps = 0; bitrateBps = 0; frameCount = 0; codecName = ""
-        droppedFrames = 0; framePacingJitterUs = 0
+        droppedFrames = 0; framePacingJitterUs = 0; lateFrames = 0
         _framesThisSec = 0; _bytesThisSec = 0
     }
 
@@ -120,6 +150,7 @@ class VideoRenderer(ctx: Context) {
 
     fun feedFrame(data: ByteArray, ntpTimeNs: Long, isH265: Boolean) {
         synchronized(lock) {
+            if (_outputFailed) stopCodec()
             _updateStats(data.size)
             if (videoWidth == 0 || videoHeight == 0) return
 
@@ -135,7 +166,6 @@ class VideoRenderer(ctx: Context) {
             try {
                 if (codec == null) startCodec(isH265)
                 _feedToCodec(data, ntpTimeNs)
-                drainOutput()
             } catch (e: Exception) {
                 Log.w(TAG, "Codec error, resetting", e)
                 stopCodec()
@@ -157,8 +187,8 @@ class VideoRenderer(ctx: Context) {
                 firstFrameQueued = true
                 return
             }
-            drainOutput()
         }
+        // also the visible symptom of the output thread holding buffers while it waits for their time
         droppedFrames++
         Log.w(TAG, "Decoder input queue full; dropping frame. drops=$droppedFrames")
     }
@@ -201,6 +231,8 @@ class VideoRenderer(ctx: Context) {
             _startWithLadder(sw, mime, s, h265)
         }
         Log.i(TAG, "Video codec started: $mime ${videoWidth}x${videoHeight} ($codecName)")
+        _resetLatency()
+        codec?.let { _startOutput(it) }
     }
 
     private fun _startWithLadder(info: MediaCodecInfo, mime: String, s: Surface, h265: Boolean) {
@@ -249,11 +281,10 @@ class VideoRenderer(ctx: Context) {
     }
 
     private fun stopCodec() {
+        _stopOutput()
         _frameIntervalIdx = 0
         _frameIntervalCount = 0
         _lastOutputFrameNs = 0L
-        _ptsBaseUs = Long.MIN_VALUE
-        _wallBaseNs = 0L
         codec?.let {
             try {
                 it.stop()
@@ -263,25 +294,79 @@ class VideoRenderer(ctx: Context) {
         codec = null
     }
 
-    private fun drainOutput() {
-        val c = codec ?: return
+    // never takes `lock`, so stopCodec can join it while holding the lock
+    private fun _startOutput(c: MediaCodec) {
+        val intervalNs = 1_000_000_000L / (if (maxFps > 0) maxFps else 60)
+        _outputFailed = false
+        _outputRunning = true
+        _syncWindowStartNs = System.nanoTime()
+        _outputThread = thread(name = "VideoOutput") { _outputLoop(c, intervalNs) }
+    }
+
+    private fun _stopOutput() {
+        val t = _outputThread ?: return
+        _outputRunning = false
+        LockSupport.unpark(t)
+        t.join()
+        _outputThread = null
+        _outputFailed = false
+    }
+
+    private fun _outputLoop(c: MediaCodec, intervalNs: Long) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
         val info = MediaCodec.BufferInfo()
-        while (true) {
-            val idx = c.dequeueOutputBuffer(info, 0)
-            if (idx < 0) break
-            _recordOutputFrameTime()
-            if (scheduledOutputBufferRelease) {
-                // schedule frame at VSYNC matching its NTP presentation time
-                val ptsUs = info.presentationTimeUs
-                if (_ptsBaseUs == Long.MIN_VALUE) {
-                    _ptsBaseUs = ptsUs
-                    _wallBaseNs = System.nanoTime()
-                }
-                c.releaseOutputBuffer(idx, _wallBaseNs + (ptsUs - _ptsBaseUs) * 1000L)
-            } else {
-                c.releaseOutputBuffer(idx, true)
+        try {
+            while (_outputRunning) {
+                val idx = c.dequeueOutputBuffer(info, OUTPUT_WAIT_US)
+                if (idx >= 0) _present(c, idx, info.presentationTimeUs * 1000, intervalNs)
+                _maybeLogSync()
             }
+        } catch (e: Exception) {
+            // the next feedFrame sees the flag and runs the usual stopCodec-and-wait-for-keyframe reset
+            Log.w(TAG, "Codec error on output thread, resetting", e)
+            _outputFailed = true
         }
+    }
+
+    private fun _present(c: MediaCodec, idx: Int, ptsNs: Long, intervalNs: Long) {
+        if (ptsNs == 0L) { // sender clock not synced yet
+            c.releaseOutputBuffer(idx, true)
+            _recordOutputFrameTime()
+            return
+        }
+        floor.observeReadyDelayNs(System.nanoTime() - ptsNs)
+        _publishLatency()
+        val target = ptsNs + floor.current() * 1_000_000L - DISPLAY_LAG_NS
+        var now = System.nanoTime()
+        while (now < target && _outputRunning) {
+            LockSupport.parkNanos(target - now)
+            now = System.nanoTime()
+        }
+        val late = floor.isLate(target, now, intervalNs)
+        _publishLatency()
+        if (late || !_outputRunning) {
+            c.releaseOutputBuffer(idx, false)
+            if (late) lateFrames++
+            return
+        }
+        c.releaseOutputBuffer(idx, true)
+        _recordOutputFrameTime()
+        val offset = now - target
+        _offsetSumNs += offset
+        _offsetMaxNs = maxOf(_offsetMaxNs, offset)
+        _offsetCount++
+    }
+
+    private fun _maybeLogSync() {
+        val now = System.nanoTime()
+        if (now - _syncWindowStartNs < SYNC_LOG_INTERVAL_NS) return
+        val meanMs = if (_offsetCount > 0) _offsetSumNs / _offsetCount / 1e6 else 0.0
+        Log.i(TAG, String.format(Locale.US,
+            "video sync: L=%dms(base %d) ready p50=%.1fms p95=%.1fms offset mean=%.1fms max=%.1fms late=%d dropped=%d",
+            effectiveLatencyMs, targetLatencyMs, floor.readyPercentileNs(50) / 1e6, floor.readyPercentileNs(95) / 1e6,
+            meanMs, _offsetMaxNs / 1e6, lateFrames, droppedFrames))
+        _syncWindowStartNs = now
+        _offsetSumNs = 0; _offsetMaxNs = 0; _offsetCount = 0
     }
 
     fun release() = synchronized(lock) {
@@ -322,5 +407,10 @@ class VideoRenderer(ctx: Context) {
         private const val FEED_WAIT_US = 20_000L
         private const val FEED_RETRIES = 10
         private const val FIRST_FEED_RETRIES = 50
+        const val BASE_LATENCY_MS = 90
+        private const val OUTPUT_WAIT_US = 10_000L
+        // a released buffer reaches the screen about one vsync later (SurfaceTexture -> GL blit -> compositor)
+        private const val DISPLAY_LAG_NS = 16_000_000L
+        private const val SYNC_LOG_INTERVAL_NS = 5_000_000_000L
     }
 }

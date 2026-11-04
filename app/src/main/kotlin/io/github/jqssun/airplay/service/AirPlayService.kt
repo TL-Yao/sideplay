@@ -396,7 +396,10 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         }
         videoRenderer.benchmarkLog = prefs.getBoolean(Prefs.BENCHMARK_LOG, Prefs.DEF_BENCHMARK_LOG)
         videoRenderer.benchmarkLogCallback = { msg -> logCallback?.invoke(msg) }
-        videoRenderer.scheduledOutputBufferRelease = prefs.getBoolean(Prefs.SCHEDULED_OUTPUT_BUFFER_RELEASE, Prefs.DEF_SCHEDULED_OUTPUT_BUFFER_RELEASE)
+        // video and audio both play at sender pts + L_eff; video raises L_eff when decoding lags
+        videoRenderer.targetLatencyMs = VideoRenderer.BASE_LATENCY_MS
+        audioRenderer.setTargetLatencyMs(VideoRenderer.BASE_LATENCY_MS)
+        videoRenderer.onEffectiveLatencyChanged = { audioRenderer.setTargetLatencyMs(it) }
         NativeBridge.nativeSetH265Enabled(nativeHandle, h265)
         NativeBridge.nativeSetCodecs(nativeHandle, alac, aac)
         val advertiseVideo = prefs.getBoolean(Prefs.ADVERTISE_VIDEO, Prefs.DEF_ADVERTISE_VIDEO)
