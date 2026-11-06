@@ -1,0 +1,8 @@
+diff --git a/lib/raop_rtp.c b/lib/raop_rtp.c
+index 35d42df..34d0bcb 100644
+--- a/lib/raop_rtp.c
++++ b/lib/raop_rtp.c
+@@ -667,0 +668,3 @@ raop_rtp_start_audio(raop_rtp_t *raop_rtp,  unsigned short *control_rport, unsig
++    /* TEARDOWN 96 only stops the thread: the previous stream's rtp_sync/client_ntp_sync would
++     * map the new stream's unrelated rtp timestamps to times hours off until its first sync */
++    raop_rtp->initial_sync = false;

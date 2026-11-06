@@ -16,6 +16,7 @@
 #include "audio_engine.h"
 #include "audio_decoder.h"
 #include "audio_output.h"
+#include "clock_convert.h"
 #include "log_sink.h"
 #include "timeline_buffer.h"
 
@@ -137,7 +138,9 @@ struct AudioEngine {
         // after any rebuild (which clears the window)
         if (ptsNs != 0) {
             const int64_t now = monoNs();
-            mArrival.add(now, now - ptsNs);
+            ptsNs = sane_pts_ns(ptsNs, now);  // rejected pts takes the unsynced (append) path
+            if (ptsNs) mArrival.add(now, now - ptsNs);
+            else mPtsRejected++;
         }
 
         const int ci = ctIndex(ct);
@@ -177,11 +180,11 @@ private:
         if (first) return;
         const TimelineBuffer::Debug d = mTimeline->debugInfo();
         mLog->info("audio sync: L=%dms arrival p50=%.1fms p95=%.1fms offset mean=%.1fms max=%.1fms "
-                   "late=%u silence=%u underrun=%u dacFallback=%u dacJitter max=%.1fms",
+                   "late=%u silence=%u underrun=%u dacFallback=%u dacJitter max=%.1fms ptsRejected=%u",
                    (int)d.targetLatencyMs, mArrival.percentileNs(50, now) / 1e6,
                    mArrival.percentileNs(95, now) / 1e6, d.offsetMeanUs / 1000.0,
                    d.offsetMaxUs / 1000.0, d.lateDrops, d.silenceFills, d.underruns,
-                   d.dacFallbacks, d.dacJitterMaxUs / 1000.0);
+                   d.dacFallbacks, d.dacJitterMaxUs / 1000.0, mPtsRejected);
     }
 
     static int ctIndex(int ct) {
@@ -221,6 +224,7 @@ private:
 
     static constexpr int64_t SYNC_LOG_NS = 5'000'000'000LL;
     int64_t mNextSyncLogNs = 0;                // decode-thread-only
+    uint32_t mPtsRejected = 0;                 // decode-thread-only, cumulative
 
     LatencyReporter mDecLatency{"decode", *mLog};
     // decoder + codec/config it was built with

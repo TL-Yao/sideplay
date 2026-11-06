@@ -57,6 +57,12 @@ static void caseClockConvert() {
     const int64_t diff = -1'699'999'000'000'000'000LL;  // mono - realtime
     CHECK(mono_from_realtime_ns(rt, diff) == 1'000'000'000'000ULL);  // 1000 s of uptime
     CHECK(mono_from_realtime_ns(rt, 0) == rt);
+
+    const int64_t now = 29'044'413LL * MS;  // an uptime from the field log
+    CHECK(sane_pts_ns(0, now) == 0);
+    CHECK(sane_pts_ns(now - 1000 * MS, now) == now - 1000 * MS);
+    CHECK(sane_pts_ns(now - 3 * 3600'000LL * MS, now) == 0);  // stale sync, hours in the past
+    CHECK(sane_pts_ns(now + 3000 * MS, now) == 0);
 }
 
 // (a) in-order writes read back on time: identical output, offset ~0

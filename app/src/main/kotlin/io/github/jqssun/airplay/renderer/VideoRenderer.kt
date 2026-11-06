@@ -71,6 +71,7 @@ class VideoRenderer(ctx: Context) {
     private var _offsetCount = 0
     private var _nextAudioPollNs = 0L
     private var _audioP95Ns = 0L
+    @Volatile private var _ptsRejected = 0  // cumulative, written under lock
 
     fun setResolution(w: Int, h: Int) {
         if (w != videoWidth || h != videoHeight) _resetLatency()
@@ -156,8 +157,11 @@ class VideoRenderer(ctx: Context) {
         benchmarkLogCallback?.invoke(msg)
     }
 
-    fun feedFrame(data: ByteArray, ntpTimeNs: Long, isH265: Boolean) {
+    fun feedFrame(data: ByteArray, rawPtsNs: Long, isH265: Boolean) {
         synchronized(lock) {
+            // a rejected pts takes the unsynced path: the frame is drawn immediately
+            val ntpTimeNs = sanePtsNs(rawPtsNs, System.nanoTime())
+            if (ntpTimeNs != rawPtsNs) _ptsRejected++
             if (_outputFailed) stopCodec()
             _updateStats(data.size)
             if (videoWidth == 0 || videoHeight == 0) return
@@ -402,9 +406,9 @@ class VideoRenderer(ctx: Context) {
         if (now - _syncWindowStartNs < SYNC_LOG_INTERVAL_NS) return
         val meanMs = if (_offsetCount > 0) _offsetSumNs / _offsetCount / 1e6 else 0.0
         Log.i(TAG, String.format(Locale.US,
-            "video sync: L=%dms(base %d) ready p50=%.1fms p95=%.1fms offset mean=%.1fms max=%.1fms late=%d dropped=%d audioP95=%.1fms",
+            "video sync: L=%dms(base %d) ready p50=%.1fms p95=%.1fms offset mean=%.1fms max=%.1fms late=%d dropped=%d audioP95=%.1fms ptsRejected=%d",
             effectiveLatencyMs, targetLatencyMs, floor.readyPercentileNs(50) / 1e6, floor.readyPercentileNs(95) / 1e6,
-            meanMs, _offsetMaxNs / 1e6, lateFrames, droppedFrames, _audioP95Ns / 1e6))
+            meanMs, _offsetMaxNs / 1e6, lateFrames, droppedFrames, _audioP95Ns / 1e6, _ptsRejected))
         _syncWindowStartNs = now
         _offsetSumNs = 0; _offsetMaxNs = 0; _offsetCount = 0
     }
