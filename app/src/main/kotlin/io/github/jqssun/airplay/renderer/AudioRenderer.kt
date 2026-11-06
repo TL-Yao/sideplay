@@ -32,6 +32,11 @@ class AudioRenderer {
         NativeBridge.nativeServerAudioSetTargetLatency(serverHandle, targetLatencyMs * 1_000_000L)
     }
 
+    // how late audio packets arrive after their sender pts (ns, last 5 s); 0 = no data
+    @Synchronized
+    fun arrivalPercentileNs(pct: Int): Long =
+        if (serverHandle == 0L) 0 else NativeBridge.nativeServerAudioArrivalPercentileNs(serverHandle, pct)
+
     @Synchronized
     fun detachEngine() {
         serverHandle = 0L

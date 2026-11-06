@@ -43,6 +43,8 @@ class VideoRenderer(ctx: Context) {
     @Volatile var effectiveLatencyMs = BASE_LATENCY_MS; private set
     // called on the output thread (or the caller of a reset) with each new L_eff
     var onEffectiveLatencyChanged: ((Int) -> Unit)? = null
+    // p95 of audio packet arrival - pts (ns, 0 = none); polled once a second by the output thread
+    var audioLatencySource: (() -> Long)? = null
     private val floor = LatencyFloor(BASE_LATENCY_MS)
 
     var enforceSdr = true
@@ -67,6 +69,8 @@ class VideoRenderer(ctx: Context) {
     private var _offsetSumNs = 0L
     private var _offsetMaxNs = 0L
     private var _offsetCount = 0
+    private var _nextAudioPollNs = 0L
+    private var _audioP95Ns = 0L
 
     fun setResolution(w: Int, h: Int) {
         if (w != videoWidth || h != videoHeight) _resetLatency()
@@ -351,6 +355,7 @@ class VideoRenderer(ctx: Context) {
     private fun _presentLoop(c: MediaCodec, intervalNs: Long) {
         while (_outputRunning) {
             _readyFrames.poll(OUTPUT_WAIT_US, TimeUnit.MICROSECONDS)?.let { _present(c, it.idx, it.ptsNs, intervalNs) }
+            _maybePollAudio()
             _maybeLogSync()
         }
     }
@@ -382,14 +387,24 @@ class VideoRenderer(ctx: Context) {
         _offsetCount++
     }
 
+    private fun _maybePollAudio() {
+        val source = audioLatencySource ?: return
+        val now = System.nanoTime()
+        if (now < _nextAudioPollNs) return
+        _nextAudioPollNs = now + AUDIO_POLL_INTERVAL_NS
+        _audioP95Ns = source()
+        floor.observeAudioP95Ns(_audioP95Ns)
+        _publishLatency()
+    }
+
     private fun _maybeLogSync() {
         val now = System.nanoTime()
         if (now - _syncWindowStartNs < SYNC_LOG_INTERVAL_NS) return
         val meanMs = if (_offsetCount > 0) _offsetSumNs / _offsetCount / 1e6 else 0.0
         Log.i(TAG, String.format(Locale.US,
-            "video sync: L=%dms(base %d) ready p50=%.1fms p95=%.1fms offset mean=%.1fms max=%.1fms late=%d dropped=%d",
+            "video sync: L=%dms(base %d) ready p50=%.1fms p95=%.1fms offset mean=%.1fms max=%.1fms late=%d dropped=%d audioP95=%.1fms",
             effectiveLatencyMs, targetLatencyMs, floor.readyPercentileNs(50) / 1e6, floor.readyPercentileNs(95) / 1e6,
-            meanMs, _offsetMaxNs / 1e6, lateFrames, droppedFrames))
+            meanMs, _offsetMaxNs / 1e6, lateFrames, droppedFrames, _audioP95Ns / 1e6))
         _syncWindowStartNs = now
         _offsetSumNs = 0; _offsetMaxNs = 0; _offsetCount = 0
     }
@@ -439,5 +454,6 @@ class VideoRenderer(ctx: Context) {
         // a released buffer reaches the screen about one vsync later (SurfaceTexture -> GL blit -> compositor)
         private const val DISPLAY_LAG_NS = 16_000_000L
         private const val SYNC_LOG_INTERVAL_NS = 5_000_000_000L
+        private const val AUDIO_POLL_INTERVAL_NS = 1_000_000_000L
     }
 }

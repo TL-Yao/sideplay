@@ -45,6 +45,8 @@ object NativeBridge {
     external fun nativeServerAudioFormat(handle: Long, ct: Int, spf: Int)
     // playout delay after sender pts, any time; takes effect on the next packets
     external fun nativeServerAudioSetTargetLatency(handle: Long, latencyNs: Long)
+    // percentile of audio packet arrival - pts over the last 5 s; 0 = no samples
+    external fun nativeServerAudioArrivalPercentileNs(handle: Long, pct: Int): Long
     // fills direct buffer with packed debug snapshot; false if audio isn't running
     external fun nativeServerAudioDebug(handle: Long, buf: java.nio.ByteBuffer): Boolean
 }

@@ -1,11 +1,14 @@
 package io.github.jqssun.airplay.renderer
 
 // Effective presentation delay L_eff (ms after sender pts) shared by video and audio:
-// never below base, raised at once when decoding gets slower, lowered only after it stays faster.
+// never below base, raised at once when video decoding or audio arrival gets slower (the larger of
+// the two wins), lowered only after both stay faster.
 class LatencyFloor(private var baseMs: Int, private val clock: () -> Long = System::nanoTime) {
 
     private val samples = ArrayDeque<Pair<Long, Long>>() // (observedAtNs, readyDelayNs)
     private var currentMs = baseMs
+    private var videoCandidateMs = baseMs
+    private var audioCandidateMs = baseMs
     private var belowSinceNs = NONE
     private var consecutiveLate = 0
     private var warmupLeft = WARMUP_FRAMES
@@ -15,6 +18,8 @@ class LatencyFloor(private var baseMs: Int, private val clock: () -> Long = Syst
         this.baseMs = baseMs
         samples.clear()
         currentMs = baseMs
+        videoCandidateMs = baseMs
+        audioCandidateMs = baseMs
         belowSinceNs = NONE
         consecutiveLate = 0
         warmupLeft = WARMUP_FRAMES
@@ -30,7 +35,21 @@ class LatencyFloor(private var baseMs: Int, private val clock: () -> Long = Syst
         samples.addLast(now to ns)
         while (samples.first().first < now - WINDOW_NS) samples.removeFirst()
 
-        val candidate = maxOf(baseMs, _ceil10Ms(_percentile(95) + MARGIN_NS))
+        videoCandidateMs = _candidateMs(_percentile(95))
+        _update(now)
+    }
+
+    // p95 of audio packet arrival - pts; 0 = no audio samples
+    @Synchronized
+    fun observeAudioP95Ns(ns: Long) {
+        audioCandidateMs = if (ns == 0L) baseMs else _candidateMs(ns)
+        _update(clock())
+    }
+
+    private fun _candidateMs(p95Ns: Long): Int = minOf(maxOf(baseMs, _ceil10Ms(p95Ns + MARGIN_NS)), MAX_MS)
+
+    private fun _update(now: Long) {
+        val candidate = maxOf(videoCandidateMs, audioCandidateMs)
         when {
             candidate > currentMs -> _raise(candidate)
             candidate < currentMs - LOWER_HYSTERESIS_MS -> {

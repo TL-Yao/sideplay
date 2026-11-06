@@ -16,6 +16,41 @@ class LatencyFloorTest {
         }
     }
 
+    // video at fps plus one audio p95 sample per second, as VideoRenderer polls it
+    private fun feedBoth(videoMs: Int, audioMs: Int, seconds: Int, fps: Int = 60) {
+        repeat(seconds) {
+            feed(videoMs, 1, fps)
+            floor.observeAudioP95Ns(audioMs * 1_000_000L)
+        }
+    }
+
+    @Test fun lateAudioArrivalRaisesAboveVideo() {
+        feedBoth(70, 250, 1)
+        assertEquals(260, floor.current()) // ceil10(250 + 10)
+    }
+
+    @Test fun lowersOnlyToTheSlowerOfTheTwo() {
+        feedBoth(70, 250, 1)
+        assertEquals(260, floor.current())
+        feedBoth(130, 70, 5) // audio fine now, video slower
+        assertEquals(260, floor.current())
+        feedBoth(130, 70, 7)
+        assertEquals(140, floor.current()) // not 90: video still needs 140
+    }
+
+    @Test fun noAudioSamplesCountAsBase() {
+        feedBoth(70, 250, 1)
+        feedBoth(70, 0, 12)
+        assertEquals(90, floor.current())
+    }
+
+    @Test fun resetForgetsAudio() {
+        feedBoth(70, 250, 1)
+        floor.reset(90)
+        feed(70, 15)
+        assertEquals(90, floor.current())
+    }
+
     @Test fun neverBelowBase() {
         feed(70, 2)
         assertEquals(90, floor.current())

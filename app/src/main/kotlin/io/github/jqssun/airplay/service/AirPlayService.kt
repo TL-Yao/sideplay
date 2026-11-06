@@ -400,6 +400,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         videoRenderer.targetLatencyMs = VideoRenderer.BASE_LATENCY_MS
         audioRenderer.setTargetLatencyMs(VideoRenderer.BASE_LATENCY_MS)
         videoRenderer.onEffectiveLatencyChanged = { audioRenderer.setTargetLatencyMs(it) }
+        // late-arriving audio raises L_eff too, or it would be dropped as late
+        videoRenderer.audioLatencySource = { audioRenderer.arrivalPercentileNs(95) }
         NativeBridge.nativeSetH265Enabled(nativeHandle, h265)
         NativeBridge.nativeSetCodecs(nativeHandle, alac, aac)
         val advertiseVideo = prefs.getBoolean(Prefs.ADVERTISE_VIDEO, Prefs.DEF_ADVERTISE_VIDEO)
