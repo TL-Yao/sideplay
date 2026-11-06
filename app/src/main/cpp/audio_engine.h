@@ -31,6 +31,10 @@ bool audio_engine_configure(AudioEngine *engine, int cushionMs, int percentilePc
  * packets; default 90 ms */
 void audio_engine_set_target_latency(AudioEngine *engine, int64_t latencyNs);
 
+/* nearest-rank percentile (pct 0..100) of packet arrival - pts_ns over the last 5 s; any
+ * thread; 0 if engine NULL or no synced packets in the window */
+int64_t audio_engine_arrival_percentile(AudioEngine *engine, int pct);
+
 /* sender is switching audio formats */
 void audio_engine_on_format(AudioEngine *engine, int ct, int spf);
 

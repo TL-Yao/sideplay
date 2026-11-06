@@ -411,6 +411,14 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeServerAudioSetTargetLate
 }
 
 extern "C"
+JNIEXPORT jlong JNICALL
+Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeServerAudioArrivalPercentileNs(
+        JNIEnv *env, jobject thiz, jlong handle, jint pct) {
+    server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
+    return ctx ? audio_engine_arrival_percentile(ctx->cb_ctx.audio_engine, pct) : 0;
+}
+
+extern "C"
 JNIEXPORT void JNICALL
 Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeServerAudioFormat(
         JNIEnv *env, jobject thiz, jlong handle, jint ct, jint spf) {

@@ -27,7 +27,10 @@ public:
 
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream *stream, void *audioData,
                                           int32_t numFrames) override {
-        mTimeline->read(static_cast<int16_t *>(audioData), numFrames, firstFrameDacNs(stream));
+        bool fallback = false;
+        const int64_t dac = firstFrameDacNs(stream, fallback);
+        mTimeline->noteDacEstimate(dac, numFrames, fallback);
+        mTimeline->read(static_cast<int16_t *>(audioData), numFrames, dac);
         return oboe::DataCallbackResult::Continue;
     }
 
@@ -40,8 +43,9 @@ private:
     // getTimestamp says frame framePosition was presented at timeNanoseconds; this
     // callback's first frame is getFramesWritten(), extrapolate linearly. called first
     // thing in the callback: pre-R OpenSL/legacy AAudio can assert if a route change
-    // lands mid-callback (oboe TechNote_ReleaseBuffer)
-    static int64_t firstFrameDacNs(oboe::AudioStream *stream) {
+    // lands mid-callback (oboe TechNote_ReleaseBuffer). dacFallback: set when no usable
+    // timestamp (the estimate below is a guess)
+    static int64_t firstFrameDacNs(oboe::AudioStream *stream, bool &dacFallback) {
         const int64_t sr = stream->getSampleRate();
         const int64_t now = monoNs();
         int64_t framePos = 0, timeNs = 0;
@@ -50,6 +54,7 @@ private:
             if (dac >= now) return dac;  // unwritten frame can't have been presented: else bogus
         }
         // no timestamp yet (stream just started) or unsupported: assume a full buffer ahead
+        dacFallback = true;
         return now + (int64_t)stream->getBufferSizeInFrames() * NS_PER_SEC / sr;
     }
 

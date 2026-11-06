@@ -198,6 +198,24 @@ static void caseFlush() {
     CHECK(isBlock(readBlock(tb, b + 10 * BLOCK_NS + L90), 10));
 }
 
+// DAC estimate stats: fallbacks counted; jitter = |DAC step - previous callback length|,
+// published with the 5 s offset window; flush forgets the previous callback
+static void caseDacEstimate() {
+    TimelineBuffer tb(SR, CH);
+    const int64_t b = base();
+    tb.noteDacEstimate(b, BLOCK, true);
+    tb.noteDacEstimate(b + BLOCK_NS, BLOCK, false);              // exact: 0
+    tb.noteDacEstimate(b + 2 * BLOCK_NS - 3 * MS, BLOCK, false); // stepped back 3 ms
+    tb.flush();
+    tb.noteDacEstimate(b + 100 * BLOCK_NS, BLOCK, true);         // after restart: not compared
+    CHECK(tb.debugInfo().dacFallbacks == 2);
+    CHECK(tb.debugInfo().dacJitterMaxUs == 0);  // window not closed yet
+    writeBlock(tb, 0, b);
+    readBlock(tb, b + L90);                     // opens the window
+    readBlock(tb, b + L90 + 6 * NS_PER_SEC);    // closes it
+    CHECK(tb.debugInfo().dacJitterMaxUs == 3000);
+}
+
 int main() {
     caseClockConvert();
     caseInOrder();
@@ -209,6 +227,7 @@ int main() {
     casePtsZero();
     caseReadHeadAhead();
     caseFlush();
+    caseDacEstimate();
     if (gFailures) { std::fprintf(stderr, "%d check(s) failed\n", gFailures); return 1; }
     std::printf("timeline_buffer selfcheck: all passed\n");
     return 0;

@@ -30,6 +30,8 @@ public:
         int32_t offsetMeanUs;      // last 5 s window: DAC time - (pts + L)
         int32_t offsetMaxUs;       // last 5 s window: largest |offset|
         uint16_t targetLatencyMs;
+        uint32_t dacFallbacks;     // cumulative: callbacks whose DAC time had no stream timestamp
+        int32_t dacJitterMaxUs;    // last 5 s window: largest |DAC step - previous callback's duration|
     };
 
     TimelineBuffer(int sampleRate, int channels)
@@ -129,9 +131,23 @@ public:
         else noteOffset(NONE, firstFrameDacMonoNs);
     }
 
+    // consumer, before read(): DAC estimate of this callback's first frame; fallback = no
+    // stream timestamp, guessed as now + buffer size
+    void noteDacEstimate(int64_t dacNs, int32_t frames, bool fallback) {
+        if (fallback) mDacFallbacks.fetch_add(1, std::memory_order_relaxed);
+        const int64_t prev = mPrevDacNs.load(std::memory_order_relaxed);
+        if (prev != NONE) {
+            const int64_t j = (dacNs - prev) - mPrevFrames * NS_PER_SEC / mSampleRate;
+            mWinDacJitterMaxNs = std::max(mWinDacJitterMaxNs, j < 0 ? -j : j);
+        }
+        mPrevDacNs.store(dacNs, std::memory_order_relaxed);
+        mPrevFrames = frames;
+    }
+
     // drop queued audio; only while consumer (output callback) is stopped
     void flush() {
         mReadPos.store(NONE, std::memory_order_relaxed);
+        mPrevDacNs.store(NONE, std::memory_order_relaxed);  // restarted stream: no previous callback
         mFlushGen.fetch_add(1, std::memory_order_release);
     }
 
@@ -144,6 +160,8 @@ public:
         d.offsetMeanUs = mOffsetMeanUs.load(std::memory_order_relaxed);
         d.offsetMaxUs = mOffsetMaxUs.load(std::memory_order_relaxed);
         d.targetLatencyMs = (uint16_t)(mLatencyNs.load(std::memory_order_relaxed) / 1'000'000);
+        d.dacFallbacks = mDacFallbacks.load(std::memory_order_relaxed);
+        d.dacJitterMaxUs = mDacJitterMaxUs.load(std::memory_order_relaxed);
         return d;
     }
 
@@ -201,6 +219,9 @@ private:
         mOffsetMeanUs.store(mWinCount ? (int32_t)(mWinSumNs / mWinCount / 1000) : 0,
                             std::memory_order_relaxed);
         mOffsetMaxUs.store((int32_t)(mWinMaxAbsNs / 1000), std::memory_order_relaxed);
+        mDacJitterMaxUs.store((int32_t)std::min<int64_t>(mWinDacJitterMaxNs / 1000, INT32_MAX),
+                              std::memory_order_relaxed);
+        mWinDacJitterMaxNs = 0;
         mWinStartNs = nowNs;
         mWinSumNs = 0;
         mWinCount = 0;
@@ -226,12 +247,17 @@ private:
     std::atomic<uint32_t> mUnderruns{0};
     std::atomic<int32_t> mOffsetMeanUs{0};
     std::atomic<int32_t> mOffsetMaxUs{0};
+    std::atomic<uint32_t> mDacFallbacks{0};
+    std::atomic<int32_t> mDacJitterMaxUs{0};
+    std::atomic<int64_t> mPrevDacNs{NONE};   // consumer; reset by flush() while consumer stopped
+    int64_t mPrevFrames = 0;                 // consumer-only
 
     // consumer-only stats window
     int64_t mWinStartNs = NONE;
     int64_t mWinSumNs = 0;
     int64_t mWinCount = 0;
     int64_t mWinMaxAbsNs = 0;
+    int64_t mWinDacJitterMaxNs = 0;
 };
 
 #endif  // TIMELINE_BUFFER_H

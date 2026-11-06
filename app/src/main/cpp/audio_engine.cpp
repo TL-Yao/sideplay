@@ -12,6 +12,7 @@
 #include <mutex>
 #include <string>
 
+#include "arrival_window.h"
 #include "audio_engine.h"
 #include "audio_decoder.h"
 #include "audio_output.h"
@@ -74,6 +75,7 @@ struct AudioEngine {
         mRunning = true;
         if (mOutput && !mOutputActive) {
             mTimeline->flush();
+            mArrival.clear();
             mOutputActive = mOutput->start();
         }
         return mOutputActive;
@@ -132,6 +134,12 @@ struct AudioEngine {
             }
         }
 
+        // after any rebuild (which clears the window)
+        if (ptsNs != 0) {
+            const int64_t now = monoNs();
+            mArrival.add(now, now - ptsNs);
+        }
+
         const int ci = ctIndex(ct);
         const CodecFormat wantConfig = ci >= 0 ? mQueued[ci].load(std::memory_order_acquire) : CodecFormat{};
         // transient codec-service failure does not mute entire session
@@ -149,6 +157,9 @@ struct AudioEngine {
         logSyncStats();
     }
 
+    // any thread: percentile of packet arrival - pts over the last 5 s; 0 = no samples
+    int64_t arrivalPercentileNs(int pct) { return mArrival.percentileNs(pct); }
+
     // any thread
     void setTargetLatency(int64_t latencyNs) {
         std::lock_guard<std::mutex> lk(mRebuildLock);
@@ -165,9 +176,12 @@ private:
         mNextSyncLogNs = now + SYNC_LOG_NS;
         if (first) return;
         const TimelineBuffer::Debug d = mTimeline->debugInfo();
-        mLog->info("audio sync: L=%dms offset mean=%.1fms max=%.1fms late=%u silence=%u underrun=%u",
-                   (int)d.targetLatencyMs, d.offsetMeanUs / 1000.0, d.offsetMaxUs / 1000.0,
-                   d.lateDrops, d.silenceFills, d.underruns);
+        mLog->info("audio sync: L=%dms arrival p50=%.1fms p95=%.1fms offset mean=%.1fms max=%.1fms "
+                   "late=%u silence=%u underrun=%u dacFallback=%u dacJitter max=%.1fms",
+                   (int)d.targetLatencyMs, mArrival.percentileNs(50, now) / 1e6,
+                   mArrival.percentileNs(95, now) / 1e6, d.offsetMeanUs / 1000.0,
+                   d.offsetMaxUs / 1000.0, d.lateDrops, d.silenceFills, d.underruns,
+                   d.dacFallbacks, d.dacJitterMaxUs / 1000.0);
     }
 
     static int ctIndex(int ct) {
@@ -182,6 +196,7 @@ private:
     void initInternals(const AudioConfig &cfg) {
         mDecLatency.setEnableLogging(cfg.benchmarkLog);
         mTimeline = std::make_shared<TimelineBuffer>(mSampleRate, mChannels);
+        mArrival.clear();
         mTimeline->setTargetLatencyNs(mTargetLatencyNs);
         mOutput = AudioOutput::create(mSampleRate, mChannels, cfg.oboeBufferFrames,
                                       cfg.lowLatency, mTimeline, mLog);
@@ -226,6 +241,8 @@ private:
     // pending config change, applied on next decode()
     std::atomic<AudioConfig *> mPending{nullptr};
 
+    ArrivalWindow mArrival;  // own lock; survives rebuilds (cleared on rebuild and flush)
+
     AudioDebugData mDebug{};
     std::atomic<int32_t> mDecodeErrors{0};
 };
@@ -255,6 +272,10 @@ bool audio_engine_configure(AudioEngine *engine, int cushionMs, int percentilePc
 
 void audio_engine_set_target_latency(AudioEngine *engine, int64_t latencyNs) {
     if (engine) engine->setTargetLatency(latencyNs);
+}
+
+int64_t audio_engine_arrival_percentile(AudioEngine *engine, int pct) {
+    return engine ? engine->arrivalPercentileNs(pct) : 0;
 }
 
 void audio_engine_on_format(AudioEngine *engine, int ct, int spf) {
